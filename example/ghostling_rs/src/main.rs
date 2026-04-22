@@ -78,7 +78,7 @@ async fn main() -> Result<()> {
     // Install the PNG decoder so the terminal can handle PNG images in the
     // Kitty Graphics Protocol. This is a process-global setting and must be
     // done before any terminal is created.
-    graphics::set_png_decoder(Some(PngDecoder))?;
+    graphics::set_png_decoder(Some(Box::new(PngDecoder)))?;
 
     // Create a ghostty virtual terminal with the computed grid and 1000
     // lines of scrollback.  This holds all the parsed screen state (cells,

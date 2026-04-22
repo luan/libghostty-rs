@@ -43,6 +43,7 @@ pub mod fmt;
 pub mod focus;
 pub mod key;
 pub mod kitty;
+pub mod log;
 pub mod mouse;
 pub mod osc;
 pub mod paste;
@@ -55,6 +56,7 @@ pub mod terminal;
 #[doc(inline)]
 pub use crate::{
     error::Error,
+    log::{Logger, set_logger},
     render::RenderState,
     terminal::{Options as TerminalOptions, Terminal},
 };

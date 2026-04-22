@@ -4,7 +4,7 @@ use std::mem::MaybeUninit;
 
 use crate::{
     alloc::{Allocator, Object},
-    error::{from_optional_result, from_result, Error, Result},
+    error::{Error, Result, from_optional_result, from_result},
     ffi::{self, TerminalData as Data, TerminalOption as Opt},
     key,
     screen::{GridRef, Screen},
@@ -468,6 +468,15 @@ impl<'alloc: 'cb, 'cb> Terminal<'alloc, 'cb> {
             Opt::COLOR_PALETTE,
             v.map(|v| v.map(ffi::ColorRgb::from)).as_ref(),
         )?;
+        Ok(self)
+    }
+
+    /// Set the maximum bytes the APC handler will buffer for all protocols.
+    ///
+    /// This prevents malicious input from causing unbounded memory allocation.
+    /// A `None` value removes all overrides, reverting to the built-in defaults.
+    pub fn set_apc_max_bytes(&mut self, max: Option<usize>) -> Result<&mut Self> {
+        self.set_optional(ffi::TerminalOption::APC_MAX_BYTES, max.as_ref())?;
         Ok(self)
     }
 }
@@ -1202,11 +1211,7 @@ mod tests {
             // SAFETY: src points to a fully initialized T wrapped in
             // ManuallyDrop, dst points to distinct uninitialized storage for
             // exactly one T, and the regions do not overlap.
-            std::ptr::copy_nonoverlapping(
-                std::ptr::from_ref(&**src).cast::<T>(),
-                dst_ptr,
-                1,
-            );
+            std::ptr::copy_nonoverlapping(std::ptr::from_ref(&**src).cast::<T>(), dst_ptr, 1);
 
             // SAFETY: src was allocated as Box<ManuallyDrop<T>> and must be
             // freed without dropping T because ownership was transferred by

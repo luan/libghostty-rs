@@ -107,7 +107,7 @@
 //! }
 //!
 //! fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!     graphics::set_png_decoder(Some(StubPngDecoder));
+//!     graphics::set_png_decoder(Some(Box::new(StubPngDecoder)))?;
 //!
 //!     let mut terminal = Terminal::new(TerminalOptions {
 //!        cols: 80,
@@ -200,6 +200,9 @@ use crate::{
     ffi,
     screen::Selection,
 };
+
+#[doc(inline)]
+pub use ffi::KittyGraphicsPlacementRenderInfo as PlacementRenderInfo;
 
 /// Opaque reference to a Kitty graphics image storage.
 ///
@@ -295,6 +298,16 @@ impl Terminal<'_, '_> {
     /// Has no effect when Kitty graphics are disabled at build time.
     pub fn set_kitty_image_from_shared_mem_allowed(&mut self, allowed: bool) -> Result<&mut Self> {
         self.set(ffi::TerminalOption::KITTY_IMAGE_MEDIUM_SHARED_MEM, &allowed)?;
+        Ok(self)
+    }
+
+    /// Set the maximum bytes the APC handler will buffer for Kitty graphics
+    /// protocol data.
+    ///
+    /// This prevents malicious input from causing unbounded memory allocation.
+    /// A `None` value removes all overrides, reverting to the built-in defaults.
+    pub fn set_apc_max_bytes_kitty(&mut self, max: Option<usize>) -> Result<&mut Self> {
+        self.set_optional(ffi::TerminalOption::APC_MAX_BYTES_KITTY, max.as_ref())?;
         Ok(self)
     }
 }
@@ -587,6 +600,32 @@ impl<'t, 'alloc> PlacementIteration<'t, 'alloc> {
         Ok(unsafe { Selection::from_raw(sel.assume_init()) })
     }
 
+    /// Get all rendering geometry for a placement in a single call.
+    ///
+    /// Combines pixel size, grid size, viewport position, and source
+    /// rectangle into one struct.
+    ///
+    /// When `viewport_visible` is false, the placement is fully off-screen
+    /// or is a virtual placement; `viewport_col` and `viewport_row` may
+    /// contain meaningless values in that case.
+    pub fn placement_render_info(
+        &self,
+        image: &Image<'t>,
+        terminal: &'t Terminal<'_, '_>,
+    ) -> Result<PlacementRenderInfo> {
+        let mut info = ffi::sized!(PlacementRenderInfo);
+        let result = unsafe {
+            ffi::ghostty_kitty_graphics_placement_render_info(
+                self.0.inner.as_raw(),
+                image.inner.as_raw(),
+                terminal.inner.as_raw(),
+                &raw mut info,
+            )
+        };
+        from_result(result)?;
+        Ok(info)
+    }
+
     /// The image ID this placement belongs to.
     pub fn image_id(&self) -> Result<u32> {
         self.get(ffi::KittyGraphicsPlacementData::IMAGE_ID)
@@ -727,6 +766,8 @@ pub enum Compression {
     ZlibDeflate = ffi::KittyImageCompression::ZLIB_DEFLATE,
 }
 
+// Unlike other sys functions (e.g. `log::set_logger`), the decoder
+// callback will only ever be called on
 thread_local! {
     static DECODE_PNG: RefCell<Option<Box<dyn DecodePng>>> = RefCell::new(None);
 }
@@ -736,7 +777,11 @@ thread_local! {
 /// When set, the terminal can accept PNG images via the Kitty Graphics Protocol.
 /// When cleared (`None` value), PNG decoding is unsupported and PNG image data
 /// will be rejected.
-pub fn set_png_decoder(f: Option<impl DecodePng>) -> Result<()> {
+///
+/// # Thread safety
+///
+/// This function must only be called on the same thread as the terminal
+pub fn set_png_decoder(f: Option<Box<dyn DecodePng>>) -> Result<()> {
     unsafe extern "C" fn callback(
         _userdata: *mut std::ffi::c_void,
         allocator: *const ffi::Allocator,
@@ -779,10 +824,8 @@ pub fn set_png_decoder(f: Option<impl DecodePng>) -> Result<()> {
         None => None,
         Some(_) => Some(callback),
     };
-    DECODE_PNG.replace(match f {
-        Some(f) => Some(Box::new(f)),
-        None => None,
-    });
+    DECODE_PNG.replace(f);
+
     crate::sys_set(
         ffi::SysOption::GHOSTTY_SYS_OPT_DECODE_PNG,
         ptr.map_or(std::ptr::null(), |p| p as *const std::ffi::c_void),

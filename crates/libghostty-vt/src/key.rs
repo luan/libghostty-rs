@@ -202,6 +202,18 @@ impl<'alloc> Encoder<'alloc> {
         }
         self
     }
+    /// Backarrow key mode.
+    ///
+    /// See <https://vt100.net/dec/ek-vt3xx-tp-002.pdf> page 170.
+    ///
+    /// If `false` (the default), `backspace` emits 0x7f.
+    /// If `true`, `backspace` emits 0x08.
+    pub fn set_backarrow_key_mode(&mut self, value: bool) -> &mut Self {
+        unsafe {
+            self.setopt(Opt::BACKARROW_KEY_MODE, std::ptr::from_ref(&value).cast());
+        }
+        self
+    }
 }
 
 impl Drop for Encoder<'_> {
