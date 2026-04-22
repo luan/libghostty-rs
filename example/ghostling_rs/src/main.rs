@@ -482,61 +482,57 @@ impl<'alloc> Renderer<'alloc> {
             let Some(image) = graphics.image(image_id) else {
                 continue;
             };
-            // Get viewport-relative position. Returns `None` when the placement
-            // is entirely off-screen or is a virtual (unicode placeholder) placement,
-            // so both cases are handled in one call.
-            let Some(vpos) = placement.viewport_pos(&image, terminal)? else {
-                continue;
-            };
 
-            // Read image dimensions and pixel data. We only handle RGBA
-            // (the PNG decoder we registered converts everything to RGBA)
-            let width = image.width()?;
-            let height = image.height()?;
-            if width == 0 || height == 0 {
+            let info = placement.placement_render_info(&image, terminal)?;
+
+            // Skip images that aren't visible in our viewport,
+            // or have zero width/height in either pixel or grid coordinates
+            if !info.viewport_visible
+                || info.pixel_width == 0
+                || info.pixel_height == 0
+                || info.grid_cols == 0
+                || info.grid_rows == 0
+            {
                 continue;
             }
+
+            // We only handle RGBA (the PNG decoder we registered converts
+            // everything to RGBA)
             if image.format()? != graphics::ImageFormat::Rgba {
                 continue;
             }
 
+            let image_width = image.width()?;
+            let image_height = image.height()?;
             let data = image.data()?;
-            if data.len() < (width * height * 4) as usize {
+            if data.len() < (image_width * image_height * 4) as usize {
                 continue;
             }
 
             // Compute grid cell count for rendered size.
-            let grid_size = placement.grid_size(&image, terminal)?;
-            if grid_size.cols == 0 || grid_size.rows == 0 {
-                continue;
-            }
             let dest_size = vec2(
-                grid_size.cols as f32 * dims.cell_width,
-                grid_size.rows as f32 * dims.cell_height,
+                info.grid_cols as f32 * dims.cell_width,
+                info.grid_rows as f32 * dims.cell_height,
             );
-
-            // Get the resolved source rectangle (handles "0 = full image"
-            // semantics and clamps to image bounds)
-            let source_rect = placement.source_rect(&image)?;
 
             // Read the sub-cell pixel offsets
             let x_offset = placement.x_offset()?;
             let y_offset = placement.y_offset()?;
 
-            let tex = Texture2D::from_rgba8(width as u16, height as u16, data);
+            let tex = Texture2D::from_rgba8(image_width as u16, image_height as u16, data);
 
             draw_texture_ex(
                 &tex,
-                PADDING + vpos.col as f32 * dims.cell_width + x_offset as f32,
-                PADDING + vpos.row as f32 * dims.cell_height + y_offset as f32,
+                PADDING + info.viewport_col as f32 * dims.cell_width + x_offset as f32,
+                PADDING + info.viewport_row as f32 * dims.cell_height + y_offset as f32,
                 WHITE,
                 DrawTextureParams {
                     dest_size: Some(dest_size),
                     source: Some(Rect {
-                        x: source_rect.x as f32,
-                        y: source_rect.y as f32,
-                        w: source_rect.width as f32,
-                        h: source_rect.height as f32,
+                        x: info.source_x as f32,
+                        y: info.source_y as f32,
+                        w: info.source_width as f32,
+                        h: info.source_height as f32,
                     }),
                     ..Default::default()
                 },
