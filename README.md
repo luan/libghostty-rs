@@ -157,7 +157,15 @@ fuzz/afl/valgrind.sh
 ```
 
 Set `PROFILE=release` to sweep the optimised build and `LOG_DIR=...` to
-redirect logs.
+redirect logs. Set `LIBGHOSTTY_FUZZ_COLS=N` and/or `LIBGHOSTTY_FUZZ_ROWS=N`
+(both u16, > 0) to pin the terminal dimensions for stress runs:
+
+```sh
+LIBGHOSTTY_FUZZ_COLS=40000 fuzz/afl/valgrind.sh
+```
+
+These env vars also work under `cargo afl fuzz`, which makes them useful for
+targeting allocation paths that only trigger at large grid sizes.
 
 ### Running the example
 

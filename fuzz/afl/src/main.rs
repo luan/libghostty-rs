@@ -6,6 +6,7 @@ use libghostty_vt::{
 };
 #[cfg(not(fuzzing))]
 use std::io::Read;
+use std::sync::OnceLock;
 
 const OPTION_BYTES: usize = 5;
 const MAX_TERMINAL_COLS_BYTE: u8 = 160;
@@ -14,6 +15,32 @@ const SCROLLBACK_MULTIPLIER: usize = 4;
 const MAX_APC_BYTES: usize = 64 * 1024;
 const CELL_WIDTH_PX: u32 = 8;
 const CELL_HEIGHT_PX: u32 = 16;
+
+// Optional env-var overrides for stress runs. When set, the corresponding
+// dimension byte from the input is ignored and every iteration uses the
+// pinned value. Parsed once at startup; AFL invokes fuzz_terminal millions
+// of times so we cannot afford a getenv + parse per call.
+const ENV_FORCE_COLS: &str = "LIBGHOSTTY_FUZZ_COLS";
+const ENV_FORCE_ROWS: &str = "LIBGHOSTTY_FUZZ_ROWS";
+
+fn forced_cols() -> Option<u16> {
+    static CACHE: OnceLock<Option<u16>> = OnceLock::new();
+    *CACHE.get_or_init(|| parse_dimension_env(ENV_FORCE_COLS))
+}
+
+fn forced_rows() -> Option<u16> {
+    static CACHE: OnceLock<Option<u16>> = OnceLock::new();
+    *CACHE.get_or_init(|| parse_dimension_env(ENV_FORCE_ROWS))
+}
+
+fn parse_dimension_env(name: &str) -> Option<u16> {
+    let raw = std::env::var(name).ok()?;
+    let value: u16 = raw
+        .parse()
+        .unwrap_or_else(|err| panic!("{name} must be a u16 (1..=65535): {err}"));
+    assert!(value > 0, "{name} must be > 0");
+    Some(value)
+}
 
 #[cfg(fuzzing)]
 fn main() {
@@ -51,8 +78,8 @@ fn fuzz_terminal(data: &[u8]) {
     let split = payload.len() / 2;
     terminal.vt_write(&payload[..split]);
 
-    let resize_cols = dimension(data[3], MAX_TERMINAL_COLS_BYTE);
-    let resize_rows = dimension(data[4], MAX_TERMINAL_ROWS_BYTE);
+    let resize_cols = forced_cols().unwrap_or_else(|| dimension(data[3], MAX_TERMINAL_COLS_BYTE));
+    let resize_rows = forced_rows().unwrap_or_else(|| dimension(data[4], MAX_TERMINAL_ROWS_BYTE));
     let _resize_result = terminal.resize(resize_cols, resize_rows, CELL_WIDTH_PX, CELL_HEIGHT_PX);
 
     terminal.vt_write(&payload[split..]);
@@ -63,8 +90,8 @@ fn terminal_options(data: &[u8]) -> TerminalOptions {
     debug_assert!(data.len() >= OPTION_BYTES);
 
     let options = TerminalOptions {
-        cols: dimension(data[0], MAX_TERMINAL_COLS_BYTE),
-        rows: dimension(data[1], MAX_TERMINAL_ROWS_BYTE),
+        cols: forced_cols().unwrap_or_else(|| dimension(data[0], MAX_TERMINAL_COLS_BYTE)),
+        rows: forced_rows().unwrap_or_else(|| dimension(data[1], MAX_TERMINAL_ROWS_BYTE)),
         max_scrollback: usize::from(data[2]) * SCROLLBACK_MULTIPLIER,
     };
 
