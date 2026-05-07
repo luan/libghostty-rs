@@ -167,6 +167,16 @@ LIBGHOSTTY_FUZZ_COLS=40000 fuzz/afl/valgrind.sh
 These env vars also work under `cargo afl fuzz`, which makes them useful for
 targeting allocation paths that only trigger at large grid sizes.
 
+`LIBGHOSTTY_FUZZ_REPEAT=N` (non-fuzzing build only) loops `fuzz_terminal` N
+times in a single process on the same input. Compare the `HEAP SUMMARY` totals
+between two runs to detect per-iteration leaks: stable bytes-in-use at exit
+across, say, `REPEAT=1` and `REPEAT=1000` means each `Terminal` cycle is
+self-contained.
+
+```sh
+LIBGHOSTTY_FUZZ_REPEAT=1000 fuzz/afl/valgrind.sh
+```
+
 ### Running the example
 
 ```sh

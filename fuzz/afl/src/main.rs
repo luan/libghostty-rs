@@ -22,6 +22,11 @@ const CELL_HEIGHT_PX: u32 = 16;
 // of times so we cannot afford a getenv + parse per call.
 const ENV_FORCE_COLS: &str = "LIBGHOSTTY_FUZZ_COLS";
 const ENV_FORCE_ROWS: &str = "LIBGHOSTTY_FUZZ_ROWS";
+// Only honored in the non-fuzzing (stdin-driven) build. AFL drives its own
+// iteration count via the fork-server, so layering an inner loop on top would
+// just slow down coverage exploration.
+#[cfg(not(fuzzing))]
+const ENV_REPEAT: &str = "LIBGHOSTTY_FUZZ_REPEAT";
 
 fn forced_cols() -> Option<u16> {
     static CACHE: OnceLock<Option<u16>> = OnceLock::new();
@@ -53,7 +58,23 @@ fn main() {
 fn main() -> std::io::Result<()> {
     let mut data = Vec::new();
     std::io::stdin().read_to_end(&mut data)?;
-    fuzz_terminal(&data);
+
+    // Run the same payload N times in a single process so leak detectors can
+    // see whether heap usage grows per iteration. Default 1 keeps the
+    // valgrind sweep behaviour unchanged for normal corpus inputs.
+    let repeat: usize = std::env::var(ENV_REPEAT)
+        .ok()
+        .map(|raw| {
+            raw.parse().unwrap_or_else(|err| {
+                panic!("{ENV_REPEAT} must be a positive integer: {err}")
+            })
+        })
+        .unwrap_or(1);
+    assert!(repeat > 0, "{ENV_REPEAT} must be > 0");
+
+    for _ in 0..repeat {
+        fuzz_terminal(&data);
+    }
     Ok(())
 }
 
