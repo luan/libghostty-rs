@@ -147,8 +147,10 @@ VM. They are not installed on macOS because upstream valgrind is broken on
 input from stdin per process) and runs every file under `fuzz/afl/in/` through
 `valgrind --leak-check=full --track-origins=yes`. The harness pulls in
 `libghostty-vt` with the `link-static` feature so there is no `LD_LIBRARY_PATH`
-dance. Per-input logs land in `target/valgrind-fuzz/` and the script exits
-non-zero on the first definite or possible leak.
+dance. Per-input logs land in `target/valgrind-fuzz/`. Only **definite** leaks
+fail the run; `still reachable` and `possibly lost` are reported but expected
+because Zig's GeneralPurposeAllocator keeps process-lifetime caches and stores
+interior pointers in its allocation headers.
 
 ```sh
 fuzz/afl/valgrind.sh

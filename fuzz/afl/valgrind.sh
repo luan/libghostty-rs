@@ -44,14 +44,16 @@ fi
 # The harness statically links libghostty-vt (see fuzz/afl/Cargo.toml), so no
 # LD_LIBRARY_PATH plumbing is required.
 
-# `--error-exitcode=1` makes a single leaking input fail CI.
-# `--errors-for-leak-kinds=definite,possible` ignores still-reachable allocations
-# from the Zig allocator's internal caches that are not actionable leaks.
+# Fail only on definite leaks. Zig's GeneralPurposeAllocator legitimately
+# retains process-lifetime caches (-> still reachable) and stores interior
+# pointers inside its allocation headers (-> possibly lost), neither of which
+# represent actionable bugs in libghostty. We still print all categories so a
+# human reviewing the logs can spot regressions.
 VALGRIND_OPTS=(
     --tool=memcheck
     --leak-check=full
-    --show-leak-kinds=definite,possible
-    --errors-for-leak-kinds=definite,possible
+    --show-leak-kinds=all
+    --errors-for-leak-kinds=definite
     --track-origins=yes
     --error-exitcode=1
     --num-callers=40
