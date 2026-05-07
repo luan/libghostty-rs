@@ -55,30 +55,29 @@ VALGRIND_OPTS=(
     --num-callers=40
 )
 
-shopt -s nullglob
 exit_status=0
 total=0
 failed=0
 
-for category in "$CORPUS_DIR"/*/; do
-    category_name=$(basename "$category")
-    for input in "$category"/*; do
-        [ -f "$input" ] || continue
-        total=$((total + 1))
-        rel=$(realpath --relative-to="$CORPUS_DIR" "$input")
-        log_file="$LOG_DIR/${rel//\//_}.log"
+# Walk every regular file under the corpus directory. The seed corpus lives
+# directly under fuzz/afl/in/ as flat files, but AFL also emits crashes/queue
+# entries into nested directories (e.g. when pointing this script at
+# fuzz/afl/out/default/queue), so recurse instead of assuming one level.
+while IFS= read -r -d '' input; do
+    total=$((total + 1))
+    rel=$(realpath --relative-to="$CORPUS_DIR" "$input")
+    log_file="$LOG_DIR/${rel//\//_}.log"
 
-        if valgrind "${VALGRIND_OPTS[@]}" \
-            --log-file="$log_file" \
-            "$BIN" <"$input" >/dev/null 2>&1; then
-            echo "ok   $rel"
-        else
-            failed=$((failed + 1))
-            exit_status=1
-            echo "FAIL $rel  ($log_file)"
-        fi
-    done
-done
+    if valgrind "${VALGRIND_OPTS[@]}" \
+        --log-file="$log_file" \
+        "$BIN" <"$input" >/dev/null 2>&1; then
+        echo "ok   $rel"
+    else
+        failed=$((failed + 1))
+        exit_status=1
+        echo "FAIL $rel  ($log_file)"
+    fi
+done < <(find "$CORPUS_DIR" -type f -print0 | sort -z)
 
 echo
 echo "Ran $total inputs, $failed failed. Logs in $LOG_DIR"
