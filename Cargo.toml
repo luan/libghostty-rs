@@ -1,5 +1,6 @@
 [workspace]
-members = ["crates/libghostty-vt", "crates/libghostty-vt-sys", "example/ghostling_rs"]
+members = ["crates/libghostty-vt", "crates/libghostty-vt-sys", "example/ghostling_rs", "fuzz/afl"]
+default-members = ["crates/libghostty-vt", "crates/libghostty-vt-sys", "example/ghostling_rs"]
 resolver = "2"
 
 [workspace.package]

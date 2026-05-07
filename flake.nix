@@ -41,6 +41,32 @@
           ];
         };
 
+        rustPlatform = pkgs.makeRustPlatform {
+          cargo = toolchain;
+          rustc = toolchain;
+        };
+
+        cargoAfl = rustPlatform.buildRustPackage rec {
+          pname = "cargo-afl";
+          version = "0.18.1";
+
+          src = pkgs.fetchCrate {
+            inherit pname version;
+            hash = "sha256-W2ELM28vHs8xjgh0gRyH/O17kDgMFxKNOnnlbputQb0=";
+          };
+
+          cargoHash = "sha256-ZJqSZGdqDd4E+PfGttsxyKsKZCBKzzCYHWhpJlTE1Zg=";
+
+          # cargo-afl's CLI tests try to write below the read-only source tree.
+          # The binary itself is enough for the dev shell and VM workflow.
+          doCheck = false;
+        };
+
+        aflplusplusAvailable = pkgs.lib.elem pkgs.stdenv.hostPlatform.system [
+          "x86_64-linux"
+          "i686-linux"
+        ];
+
         craneLib = (crane.mkLib pkgs).overrideToolchain toolchain;
         unfilteredRoot = ./.;
 
@@ -122,19 +148,83 @@
             inherit cargoArtifacts;
           }
         );
+
+        aflVm = nixpkgs.lib.nixosSystem {
+          system = "x86_64-linux";
+          specialArgs = { hostPkgs = pkgs; };
+          modules = [
+            ({ hostPkgs, pkgs, ... }: {
+              networking.hostName = "libghostty-afl";
+
+              nix.settings.experimental-features = ["nix-command" "flakes"];
+
+              virtualisation.vmVariant.virtualisation = {
+                host.pkgs = hostPkgs;
+                graphics = false;
+                memorySize = 4096;
+                cores = 4;
+              };
+
+              fileSystems."/work" = {
+                device = "work";
+                fsType = "9p";
+                options = [
+                  "trans=virtio"
+                  "version=9p2000.L"
+                  "msize=104857600"
+                ];
+              };
+
+              users.users.nixos = {
+                isNormalUser = true;
+                extraGroups = ["wheel"];
+              };
+              services.getty.autologinUser = "nixos";
+              security.sudo.wheelNeedsPassword = false;
+
+              environment.systemPackages = [
+                pkgs.git
+              ];
+
+              system.stateVersion = "25.11";
+            })
+          ];
+        };
+
+        aflVmApp = pkgs.writeShellApplication {
+          name = "afl-vm";
+          text = ''
+            repo="''${1:-$PWD}"
+            export QEMU_OPTS="''${QEMU_OPTS-} -virtfs local,path=$repo,mount_tag=work,security_model=none,multidevs=remap"
+            runner=$(echo ${aflVm.config.system.build.vm}/bin/run-*-vm)
+            exec "$runner"
+          '';
+        };
       in {
-        packages.default = application;
+        packages = {
+          default = application;
+          "cargo-afl" = cargoAfl;
+          "afl-vm" = aflVm.config.system.build.vm;
+        };
+
+        apps.afl-vm = {
+          type = "app";
+          program = "${aflVmApp}/bin/afl-vm";
+        };
 
         devShells.default = craneLib.devShell {
           packages = [
             toolchain
             zigPkg
+            cargoAfl
             pkgs.clang
             pkgs.libclang
             pkgs.pkg-config
             pkgs.openssl
             pkgs.cmake
             pkgs.ninja
+          ] ++ pkgs.lib.optionals aflplusplusAvailable [
+            pkgs.aflplusplus
           ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
             pkgs.libx11
             pkgs.libxcursor

@@ -92,6 +92,49 @@ cargo test -p libghostty-vt-sys
 cargo build -p ghostling_rs
 ```
 
+## AFL++ fuzzing
+
+`cargo-afl` is the Rust integration for AFL++. The Nix dev shell provides
+`cargo-afl` on all supported hosts. AFL++ itself is available in nixpkgs on
+Linux, so macOS users should run the checked-in VM and enter the dev shell from
+inside Linux:
+
+```sh
+nix develop
+cargo afl build -p libghostty-vt-afl-fuzz
+
+# Linux
+LD_LIBRARY_PATH=$(dirname $(find target/debug/build/libghostty-vt-sys-*/out -name "libghostty-vt*" | head -1)) \
+  cargo afl fuzz -i fuzz/afl/in -o fuzz/afl/out target/debug/libghostty-vt-afl-fuzz
+```
+
+On macOS, boot the Linux VM first and run the Linux commands from `/work`:
+
+```sh
+nix run .#afl-vm
+
+# Inside the VM:
+cd /work
+nix develop
+cargo afl build -p libghostty-vt-afl-fuzz
+LD_LIBRARY_PATH=$(dirname $(find target/debug/build/libghostty-vt-sys-*/out -name "libghostty-vt*" | head -1)) \
+  cargo afl fuzz -i fuzz/afl/in -o fuzz/afl/out target/debug/libghostty-vt-afl-fuzz
+```
+
+The fuzz target derives terminal dimensions from the first few bytes, feeds the
+remaining bytes through `Terminal::vt_write`, resizes the terminal once, and
+then walks render-state rows and cells. This exercises the safe Rust API, the
+FFI boundary, effect callbacks, VT parsing, resize handling, and rendering
+snapshot reads. AFL++ state is written to `fuzz/afl/out`, which is intentionally
+not created by default.
+
+To reproduce a crash, pass the crashing input back through the same binary:
+
+```sh
+LD_LIBRARY_PATH=$(dirname $(find target/debug/build/libghostty-vt-sys-*/out -name "libghostty-vt*" | head -1)) \
+  cargo afl run target/debug/libghostty-vt-afl-fuzz < fuzz/afl/out/default/crashes/id:000000,...
+```
+
 ### Running the example
 
 ```sh
