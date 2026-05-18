@@ -1,6 +1,6 @@
 //! Types and functions around terminal state management.
 
-use std::mem::MaybeUninit;
+use std::{borrow::Cow, mem::MaybeUninit};
 
 use crate::{
     alloc::{Allocator, Object},
@@ -176,8 +176,9 @@ impl<'alloc: 'cb, 'cb> Terminal<'alloc, 'cb> {
     /// are logged internally but do not cause this function to fail because
     /// this input is assumed to be untrusted and from an external source; so
     /// the primary goal is to keep the terminal state consistent and not allow
-    /// malformed input to corrupt or crash.    
+    /// malformed input to corrupt or crash.
     pub fn vt_write(&mut self, data: &[u8]) {
+        let data = sanitize_kitty_graphics_commands(data);
         unsafe { ffi::ghostty_terminal_vt_write(self.inner.as_raw(), data.as_ptr(), data.len()) }
     }
 
@@ -484,6 +485,91 @@ impl Drop for Terminal<'_, '_> {
     fn drop(&mut self) {
         unsafe { ffi::ghostty_terminal_free(self.inner.as_raw()) }
     }
+}
+
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+fn find_osc_terminator(bytes: &[u8]) -> Option<(usize, usize)> {
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            0x07 => return Some((index, 1)),
+            0x1b if bytes.get(index + 1) == Some(&b'\\') => return Some((index, 2)),
+            _ => index += 1,
+        }
+    }
+    None
+}
+
+fn sanitize_kitty_graphics_commands(data: &[u8]) -> Cow<'_, [u8]> {
+    let mut out: Option<Vec<u8>> = None;
+    let mut read_start = 0;
+    while let Some(relative_start) = find_subslice(&data[read_start..], b"\x1b_G") {
+        let start = read_start + relative_start;
+        let payload_start = start + 3;
+        let Some((payload_len, terminator_len)) = find_osc_terminator(&data[payload_start..])
+        else {
+            read_start = payload_start;
+            continue;
+        };
+        let payload_end = payload_start + payload_len;
+        let payload = &data[payload_start..payload_end];
+        let control_end = payload
+            .iter()
+            .position(|byte| *byte == b';')
+            .unwrap_or(payload.len());
+        let control = &payload[..control_end];
+        let Some(sanitized_control) = sanitize_kitty_graphics_control(control) else {
+            read_start = payload_end + terminator_len;
+            continue;
+        };
+
+        let out = out.get_or_insert_with(|| Vec::with_capacity(data.len()));
+        out.extend_from_slice(&data[read_start..payload_start]);
+        out.extend_from_slice(&sanitized_control);
+        out.extend_from_slice(&payload[control_end..payload.len()]);
+        out.extend_from_slice(&data[payload_end..payload_end + terminator_len]);
+        read_start = payload_end + terminator_len;
+    }
+
+    match out {
+        Some(mut out) => {
+            out.extend_from_slice(&data[read_start..]);
+            Cow::Owned(out)
+        }
+        None => Cow::Borrowed(data),
+    }
+}
+
+fn sanitize_kitty_graphics_control(control: &[u8]) -> Option<Vec<u8>> {
+    let mut changed = false;
+    let mut sanitized = Vec::with_capacity(control.len());
+    for field in control.split(|byte| *byte == b',') {
+        let Some(separator) = field.iter().position(|byte| *byte == b'=') else {
+            append_kitty_graphics_field(&mut sanitized, field);
+            continue;
+        };
+        let key = &field[..separator];
+        let value = &field[separator + 1..];
+        if key.len() != 1 || value.len() > 11 {
+            changed = true;
+            continue;
+        }
+        append_kitty_graphics_field(&mut sanitized, field);
+    }
+
+    changed.then_some(sanitized)
+}
+
+fn append_kitty_graphics_field(out: &mut Vec<u8>, field: &[u8]) {
+    if !out.is_empty() {
+        out.push(b',');
+    }
+    out.extend_from_slice(field);
 }
 
 /// A point in the terminal grid.
@@ -1153,7 +1239,7 @@ handlers! {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
     use std::mem::ManuallyDrop;
     use std::rc::Rc;
 
@@ -1239,5 +1325,83 @@ mod tests {
         // Primary DA request (CSI c) should invoke on_device_attributes.
         terminal.vt_write(b"\x1b[c");
         assert_eq!(callback_count.get(), 1);
+    }
+
+    #[test]
+    fn vt_write_normalizes_kitty_graphics_ignored_control_fields() {
+        let mut terminal = Terminal::new(Options {
+            cols: 80,
+            rows: 24,
+            max_scrollback: 1000,
+        })
+        .expect("terminal should initialize");
+
+        terminal.vt_write(b"\x1b_Gf=24,s=1,v=1,hello=world,i=74;qqqq\x1b\\");
+        let image = terminal
+            .kitty_graphics()
+            .expect("kitty graphics")
+            .image(74)
+            .expect("image with unknown long key should load");
+        assert_eq!(image.width().unwrap(), 1);
+        assert_eq!(image.height().unwrap(), 1);
+
+        let output = Rc::new(RefCell::new(Vec::new()));
+        terminal
+            .on_pty_write({
+                let output = output.clone();
+                move |_terminal, bytes| output.borrow_mut().extend_from_slice(bytes)
+            })
+            .expect("pty callback should install");
+        terminal
+            .vt_write(b"\x1b_Ga=t,f=24,s=10,v=2000000000000000000000000000000000000000,i=75\x1b\\");
+        assert_eq!(
+            output.borrow().as_slice(),
+            b"\x1b_Gi=75;EINVAL: dimensions required\x1b\\"
+        );
+    }
+
+    #[test]
+    fn vt_write_inherits_apc_handler_edges() {
+        let mut terminal = Terminal::new(Options {
+            cols: 80,
+            rows: 24,
+            max_scrollback: 1000,
+        })
+        .expect("terminal should initialize");
+        let output = Rc::new(RefCell::new(Vec::new()));
+        terminal
+            .on_pty_write({
+                let output = output.clone();
+                move |_terminal, bytes| output.borrow_mut().extend_from_slice(bytes)
+            })
+            .expect("pty callback should install");
+
+        for input in [
+            b"\x1b_Xabcdef1234\x1b\\".as_slice(),
+            b"\x1b_Gabcdef1234\x1b\\",
+            b"\x1b_Ga=p,i=10000000000\x1b\\",
+            b"\x1b_Ga=p,i=1,z=-9999999999\x1b\\",
+        ] {
+            terminal.vt_write(input);
+            assert!(output.borrow().is_empty());
+        }
+
+        terminal
+            .set_apc_max_bytes_kitty(Some(2))
+            .expect("set APC byte limit");
+        terminal.vt_write(b"\x1b_Ga=T,f=24,s=1,v=1,i=80;AAAA\x1b\\");
+        assert!(terminal.kitty_graphics().unwrap().image(80).is_none());
+
+        terminal
+            .set_apc_max_bytes_kitty(None)
+            .expect("reset APC byte limit");
+        terminal.vt_write(b"\x1b_Ga=T,f=24,s=1,v=1,i=81;AAAA\x1b\\");
+        let image = terminal
+            .kitty_graphics()
+            .expect("kitty graphics")
+            .image(81)
+            .expect("valid APC image");
+        assert_eq!(image.width().unwrap(), 1);
+        assert_eq!(image.height().unwrap(), 1);
     }
 }
