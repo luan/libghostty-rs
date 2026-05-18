@@ -112,6 +112,7 @@ pub struct Terminal<'alloc: 'cb, 'cb> {
     // Keep callbacks in a heap allocation so C can store a userdata pointer
     // to the VTable itself. That pointer remains stable even if Terminal moves.
     vtable: Box<VTable<'alloc, 'cb>>,
+    osc_pwd_pending: Vec<u8>,
 }
 
 /// Terminal initialization options.
@@ -161,6 +162,7 @@ impl<'alloc: 'cb, 'cb> Terminal<'alloc, 'cb> {
         Ok(Self {
             inner: Object::new(raw)?,
             vtable: Box::new(VTable::default()),
+            osc_pwd_pending: Vec::new(),
         })
     }
 
@@ -179,6 +181,7 @@ impl<'alloc: 'cb, 'cb> Terminal<'alloc, 'cb> {
     /// malformed input to corrupt or crash.    
     pub fn vt_write(&mut self, data: &[u8]) {
         unsafe { ffi::ghostty_terminal_vt_write(self.inner.as_raw(), data.as_ptr(), data.len()) }
+        self.apply_osc_pwd_updates(&data);
     }
 
     /// Resize the terminal to the given dimensions.
@@ -216,7 +219,46 @@ impl<'alloc: 'cb, 'cb> Terminal<'alloc, 'cb> {
     /// including modes, scrollback, scrolling region, and screen contents.
     /// The terminal dimensions are preserved.
     pub fn reset(&mut self) {
+        self.osc_pwd_pending.clear();
         unsafe { ffi::ghostty_terminal_reset(self.inner.as_raw()) }
+    }
+
+    fn apply_osc_pwd_updates(&mut self, data: &[u8]) {
+        let mut bytes = Vec::with_capacity(self.osc_pwd_pending.len() + data.len());
+        bytes.extend_from_slice(&self.osc_pwd_pending);
+        bytes.extend_from_slice(data);
+        self.osc_pwd_pending.clear();
+
+        let mut search_start = 0;
+        while let Some(relative_start) = find_subslice(&bytes[search_start..], b"\x1b]7;") {
+            let start = search_start + relative_start;
+            let payload_start = start + 4;
+            match find_osc_terminator(&bytes[payload_start..]) {
+                Some((payload_len, terminator_len)) => {
+                    let payload = &bytes[payload_start..payload_start + payload_len];
+                    self.set_pwd_bytes(payload);
+                    search_start = payload_start + payload_len + terminator_len;
+                }
+                None => {
+                    self.osc_pwd_pending.extend_from_slice(&bytes[start..]);
+                    break;
+                }
+            }
+        }
+    }
+
+    fn set_pwd_bytes(&mut self, pwd: &[u8]) {
+        let string = ffi::String {
+            ptr: pwd.as_ptr(),
+            len: pwd.len(),
+        };
+        let _ = unsafe {
+            ffi::ghostty_terminal_set(
+                self.inner.as_raw(),
+                ffi::TerminalOption::PWD,
+                std::ptr::from_ref(&string).cast(),
+            )
+        };
     }
 
     /// Scroll the terminal viewport.
@@ -486,6 +528,23 @@ impl Drop for Terminal<'_, '_> {
     }
 }
 
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+fn find_osc_terminator(bytes: &[u8]) -> Option<(usize, usize)> {
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            0x07 => return Some((index, 1)),
+            0x1b if bytes.get(index + 1) == Some(&b'\\') => return Some((index, 2)),
+            _ => index += 1,
+        }
+    }
+    None
+}
 /// A point in the terminal grid.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Point {
@@ -937,6 +996,7 @@ macro_rules! handlers {
                     let mut term = ::core::mem::ManuallyDrop::new($crate::terminal::Terminal::<'_, '_> {
                         inner: obj,
                         vtable: ::core::default::Default::default(),
+                        osc_pwd_pending: ::std::vec::Vec::new(),
                     });
                     let $t: &$crate::terminal::Terminal = &term;
                     let $func = vtable.$name.as_deref_mut()
@@ -1239,5 +1299,25 @@ mod tests {
         // Primary DA request (CSI c) should invoke on_device_attributes.
         terminal.vt_write(b"\x1b[c");
         assert_eq!(callback_count.get(), 1);
+    }
+    #[test]
+    fn vt_write_updates_pwd_from_split_osc7() {
+        let mut terminal = Terminal::new(Options {
+            cols: 80,
+            rows: 24,
+            max_scrollback: 1000,
+        })
+        .expect("terminal should initialize");
+
+        terminal.vt_write(b"\x1b]7;file:///tmp/example\x07");
+        assert_eq!(terminal.pwd().unwrap(), "file:///tmp/example");
+
+        terminal.vt_write(b"\x1b]7;file:///tmp/split");
+        assert_eq!(terminal.pwd().unwrap(), "file:///tmp/example");
+        terminal.vt_write(b"-path\x1b\\");
+        assert_eq!(terminal.pwd().unwrap(), "file:///tmp/split-path");
+
+        terminal.reset();
+        assert_eq!(terminal.pwd().unwrap(), "");
     }
 }
